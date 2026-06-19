@@ -1,12 +1,44 @@
 import logging
+import asyncio
 from datetime import datetime, date
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
+from dataclasses import dataclass
 from sqlalchemy.orm import Session
 from app import crud, models
+from app.schemas.schemas import CurrentWeather, WeatherForecast, WeatherAlertCheck
 from app.services.weather_service import WeatherService
 from app.services.notification import NotificationService
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RouteRawData:
+    start_weather: Optional[CurrentWeather]
+    end_weather: Optional[CurrentWeather]
+    start_forecast: Optional[WeatherForecast]
+    end_forecast: Optional[WeatherForecast]
+    start_alerts: WeatherAlertCheck
+    end_alerts: WeatherAlertCheck
+
+
+@dataclass
+class RiskAssessment:
+    risk_level: str
+    alerts_count: int
+    air_quality_warning: bool
+    aqi_warning_detail: str
+    recommendations: List[str]
+
+
+@dataclass
+class AirQualityInfo:
+    aqi: Optional[int]
+    aqi_level: Optional[str]
+    pm2_5: Optional[float]
+    pm10: Optional[float]
+    has_warning: bool
+    warning_msg: str
 
 
 class BriefingService:
@@ -21,29 +53,42 @@ class BriefingService:
             return None
         briefing_date = briefing_date or datetime.now().date()
         routes = crud.get_fleet_routes(self.db, fleet_id)
+        details = await self._build_briefing_details(fleet, routes, briefing_date)
+        alerts_count = sum(r.get("alerts_count", 0) for r in details["routes"])
+        summary = self._build_summary(fleet.name, briefing_date, details, alerts_count)
+        details["summary_points"] = self._build_summary_points(details, alerts_count)
+        briefing = self._save_briefing(fleet_id, briefing_date, summary, details, alerts_count)
+        logger.info(f"Generated briefing for fleet {fleet.name}: {alerts_count} alerts")
+        return briefing
+
+    async def _build_briefing_details(self, fleet: models.Fleet,
+                                      routes: List[models.RouteSegment],
+                                      briefing_date: date) -> Dict[str, Any]:
         details: Dict[str, Any] = {
             "fleet_name": fleet.name,
             "date": briefing_date.isoformat(),
             "routes": [],
             "summary_points": [],
         }
-        alerts_count = 0
         for route in routes:
-            route_info = await self._analyze_route(route)
-            details["routes"].append(route_info)
-            alerts_count += route_info.get("alerts_count", 0)
-        summary = self._build_summary(fleet.name, briefing_date, details, alerts_count)
-        details["summary_points"] = self._build_summary_points(details, alerts_count)
-        briefing = crud.create_weather_briefing(
+            try:
+                route_info = await self._analyze_route(route)
+                details["routes"].append(route_info)
+            except Exception as e:
+                logger.error(f"Failed to analyze route {route.id}: {e}")
+                details["routes"].append(self._empty_route_result(route))
+        return details
+
+    def _save_briefing(self, fleet_id: int, briefing_date: date, summary: str,
+                       details: Dict[str, Any], alerts_count: int) -> models.WeatherBriefing:
+        return crud.create_weather_briefing(
             self.db, fleet_id=fleet_id,
             briefing_date=datetime.combine(briefing_date, datetime.min.time()),
             summary=summary, details=details, alerts_count=alerts_count,
         )
-        logger.info(f"Generated briefing for fleet {fleet.name}: {alerts_count} alerts")
-        return briefing
 
-    async def _analyze_route(self, route: models.RouteSegment) -> Dict[str, Any]:
-        result = {
+    def _empty_route_result(self, route: models.RouteSegment) -> Dict[str, Any]:
+        return {
             "route_id": route.id,
             "route_name": route.name,
             "start_city": route.start_city,
@@ -56,77 +101,125 @@ class BriefingService:
             "forecast": [],
             "alerts_count": 0,
             "risk_level": "low",
-            "recommendation": "",
+            "recommendation": "路线数据分析失败，请稍后重试",
         }
-        try:
-            start_w = await self.weather_service.get_current_by_city(route.start_city, include_aqi=True)
-            result["start_weather"] = start_w.model_dump() if start_w else None
-            end_w = await self.weather_service.get_current_by_city(route.end_city, include_aqi=True)
-            result["end_weather"] = end_w.model_dump() if end_w else None
-            aqi_warnings = []
-            if start_w and start_w.aqi is not None:
-                result["start_air_quality"] = {
-                    "aqi": start_w.aqi,
-                    "aqi_level": start_w.aqi_level,
-                    "pm2_5": start_w.pm2_5,
-                    "pm10": start_w.pm10,
-                }
-                if start_w.aqi > 150:
-                    aqi_warnings.append(f"{route.start_city} AQI={start_w.aqi}({start_w.aqi_level})，已达中度污染及以上")
-            if end_w and end_w.aqi is not None:
-                result["end_air_quality"] = {
-                    "aqi": end_w.aqi,
-                    "aqi_level": end_w.aqi_level,
-                    "pm2_5": end_w.pm2_5,
-                    "pm10": end_w.pm10,
-                }
-                if end_w.aqi > 150:
-                    aqi_warnings.append(f"{route.end_city} AQI={end_w.aqi}({end_w.aqi_level})，已达中度污染及以上")
-            if aqi_warnings:
-                result["air_quality_warning"] = True
-                result["aqi_warning_detail"] = " | ".join(aqi_warnings)
-            start_fc = await self.weather_service.get_forecast_by_city(route.start_city, days=3)
-            if start_fc:
-                result["forecast"].append({"city": route.start_city,
-                                           "days": [d.model_dump() for d in start_fc.days]})
-            end_fc = await self.weather_service.get_forecast_by_city(route.end_city, days=3)
-            if end_fc:
-                result["forecast"].append({"city": route.end_city,
-                                           "days": [d.model_dump() for d in end_fc.days]})
-            alert_check_start = await self.weather_service.check_alerts(
-                route.start_city, route.start_latitude, route.start_longitude
-            )
-            alert_check_end = await self.weather_service.check_alerts(
-                route.end_city, route.end_latitude, route.end_longitude
-            )
-            result["alerts_count"] = len(alert_check_start.alerts) + len(alert_check_end.alerts)
-            all_recommendations = []
-            if result["alerts_count"] > 0:
-                result["risk_level"] = "high"
-                all_recommendations.append("建议调整运输计划或加强温湿度监控，必要时改道行驶")
-            elif self._forecast_has_risk(start_fc) or self._forecast_has_risk(end_fc):
-                if result["risk_level"] != "high":
-                    result["risk_level"] = "medium"
-                all_recommendations.append("未来三天有天气变化风险，请保持关注并准备应急方案")
-            if result["air_quality_warning"]:
-                if result["risk_level"] != "high":
-                    result["risk_level"] = "medium"
-                aqi_msg_parts = []
-                if start_w and start_w.aqi and start_w.aqi > 150:
-                    aqi_msg_parts.append(f"【{route.start_city} AQI={start_w.aqi} 红色预警】请关闭车窗减少通风")
-                if end_w and end_w.aqi and end_w.aqi > 150:
-                    aqi_msg_parts.append(f"【{route.end_city} AQI={end_w.aqi} 红色预警】请关闭车窗减少通风")
-                aqi_msg_parts.append("加强冷链货箱密封，防止外部污染空气进入影响生鲜品质")
-                all_recommendations.extend(aqi_msg_parts)
-            if not all_recommendations:
-                result["recommendation"] = "沿途天气及空气质量良好，适合冷链运输，按原计划执行即可"
-            else:
-                result["recommendation"] = " | ".join(all_recommendations)
-        except Exception as e:
-            logger.error(f"Failed to analyze route {route.id}: {e}")
-        return result
 
-    def _forecast_has_risk(self, forecast) -> bool:
+    async def _analyze_route(self, route: models.RouteSegment) -> Dict[str, Any]:
+        raw_data = await self._fetch_route_data(route)
+        risk = self._assess_risk(route, raw_data)
+        return self._format_route_result(route, raw_data, risk)
+
+    async def _fetch_route_data(self, route: models.RouteSegment) -> RouteRawData:
+        start_w, end_w = await asyncio.gather(
+            self.weather_service.get_current_by_city(route.start_city, include_aqi=True),
+            self.weather_service.get_current_by_city(route.end_city, include_aqi=True),
+        )
+        start_fc, end_fc = await asyncio.gather(
+            self.weather_service.get_forecast_by_city(route.start_city, days=3),
+            self.weather_service.get_forecast_by_city(route.end_city, days=3),
+        )
+        start_alerts, end_alerts = await asyncio.gather(
+            self.weather_service.check_alerts(route.start_city, route.start_latitude, route.start_longitude),
+            self.weather_service.check_alerts(route.end_city, route.end_latitude, route.end_longitude),
+        )
+        return RouteRawData(
+            start_weather=start_w,
+            end_weather=end_w,
+            start_forecast=start_fc,
+            end_forecast=end_fc,
+            start_alerts=start_alerts,
+            end_alerts=end_alerts,
+        )
+
+    def _assess_risk(self, route: models.RouteSegment, data: RouteRawData) -> RiskAssessment:
+        alerts_count = len(data.start_alerts.alerts) + len(data.end_alerts.alerts)
+        start_aqi = self._extract_air_quality(data.start_weather, route.start_city)
+        end_aqi = self._extract_air_quality(data.end_weather, route.end_city)
+        air_quality_warning = start_aqi.has_warning or end_aqi.has_warning
+        aqi_warning_parts = [w.warning_msg for w in [start_aqi, end_aqi] if w.warning_msg]
+        aqi_warning_detail = " | ".join(aqi_warning_parts) if aqi_warning_parts else ""
+
+        recommendations: List[str] = []
+        risk_level = "low"
+
+        if alerts_count > 0:
+            risk_level = "high"
+            recommendations.append("建议调整运输计划或加强温湿度监控，必要时改道行驶")
+        elif self._forecast_has_risk(data.start_forecast) or self._forecast_has_risk(data.end_forecast):
+            risk_level = "medium"
+            recommendations.append("未来三天有天气变化风险，请保持关注并准备应急方案")
+
+        if air_quality_warning:
+            if risk_level != "high":
+                risk_level = "medium"
+            if start_aqi.has_warning:
+                recommendations.append(f"【{route.start_city} AQI={start_aqi.aqi} 红色预警】请关闭车窗减少通风")
+            if end_aqi.has_warning:
+                recommendations.append(f"【{route.end_city} AQI={end_aqi.aqi} 红色预警】请关闭车窗减少通风")
+            recommendations.append("加强冷链货箱密封，防止外部污染空气进入影响生鲜品质")
+
+        if not recommendations:
+            recommendations.append("沿途天气及空气质量良好，适合冷链运输，按原计划执行即可")
+
+        return RiskAssessment(
+            risk_level=risk_level,
+            alerts_count=alerts_count,
+            air_quality_warning=air_quality_warning,
+            aqi_warning_detail=aqi_warning_detail,
+            recommendations=recommendations,
+        )
+
+    def _extract_air_quality(self, weather: Optional[CurrentWeather], city: str) -> AirQualityInfo:
+        if not weather or weather.aqi is None:
+            return AirQualityInfo(None, None, None, None, False, "")
+        has_warning = weather.aqi > 150
+        warning_msg = f"{city} AQI={weather.aqi}({weather.aqi_level})，已达中度污染及以上" if has_warning else ""
+        return AirQualityInfo(
+            aqi=weather.aqi,
+            aqi_level=weather.aqi_level,
+            pm2_5=weather.pm2_5,
+            pm10=weather.pm10,
+            has_warning=has_warning,
+            warning_msg=warning_msg,
+        )
+
+    def _format_route_result(self, route: models.RouteSegment,
+                              data: RouteRawData, risk: RiskAssessment) -> Dict[str, Any]:
+        start_aqi = self._extract_air_quality(data.start_weather, route.start_city)
+        end_aqi = self._extract_air_quality(data.end_weather, route.end_city)
+
+        forecast = []
+        if data.start_forecast:
+            forecast.append({"city": route.start_city,
+                             "days": [d.model_dump() for d in data.start_forecast.days]})
+        if data.end_forecast:
+            forecast.append({"city": route.end_city,
+                             "days": [d.model_dump() for d in data.end_forecast.days]})
+
+        return {
+            "route_id": route.id,
+            "route_name": route.name,
+            "start_city": route.start_city,
+            "end_city": route.end_city,
+            "start_weather": data.start_weather.model_dump() if data.start_weather else None,
+            "end_weather": data.end_weather.model_dump() if data.end_weather else None,
+            "start_air_quality": {
+                "aqi": start_aqi.aqi, "aqi_level": start_aqi.aqi_level,
+                "pm2_5": start_aqi.pm2_5, "pm10": start_aqi.pm10,
+            } if start_aqi.aqi is not None else None,
+            "end_air_quality": {
+                "aqi": end_aqi.aqi, "aqi_level": end_aqi.aqi_level,
+                "pm2_5": end_aqi.pm2_5, "pm10": end_aqi.pm10,
+            } if end_aqi.aqi is not None else None,
+            "air_quality_warning": risk.air_quality_warning,
+            "aqi_warning_detail": risk.aqi_warning_detail,
+            "forecast": forecast,
+            "alerts_count": risk.alerts_count,
+            "risk_level": risk.risk_level,
+            "recommendation": " | ".join(risk.recommendations),
+        }
+
+    def _forecast_has_risk(self, forecast: Optional[WeatherForecast]) -> bool:
         if not forecast:
             return False
         for d in forecast.days:
@@ -166,7 +259,9 @@ class BriefingService:
         aqi_points = []
         for r in details.get("routes", []):
             if r.get("air_quality_warning") and r.get("aqi_warning_detail"):
-                aqi_points.append(f"{r['route_name']}: 【空气质量预警】{r['aqi_warning_detail']}。请关闭车窗减少通风，加强货箱密封。")
+                aqi_points.append(
+                    f"{r['route_name']}: 【空气质量预警】{r['aqi_warning_detail']}。请关闭车窗减少通风，加强货箱密封。"
+                )
             if r.get("risk_level") != "low" and not r.get("air_quality_warning"):
                 points.append(f"{r['route_name']}: {r.get('recommendation', '')}")
         points.extend(aqi_points)
@@ -217,50 +312,58 @@ class SubscriptionService:
             "data": {},
         }
         if sub.scope_type == "city":
-            city = crud.get_city(self.db, sub.scope_id)
-            if not city:
-                return None
-            current = await self.weather_service.get_current_by_city(city.name)
-            forecast = await self.weather_service.get_forecast_by_city(city.name, days=3)
-            alert_check = await self.weather_service.check_alerts(city.name, city.latitude, city.longitude)
-            content["data"] = {
-                "city": city.name,
-                "current": current.model_dump() if current else None,
-                "forecast_3d": [d.model_dump() for d in forecast.days] if forecast else [],
-                "alerts": [a.model_dump() for a in alert_check.alerts],
-            }
+            content["data"] = await self._build_city_content(sub)
         elif sub.scope_type == "route":
-            route = crud.get_route_segment(self.db, sub.scope_id)
-            if not route:
-                return None
-            start_w = await self.weather_service.get_current_by_city(route.start_city)
-            end_w = await self.weather_service.get_current_by_city(route.end_city)
-            alert_check_start = await self.weather_service.check_alerts(
-                route.start_city, route.start_latitude, route.start_longitude
-            )
-            alert_check_end = await self.weather_service.check_alerts(
-                route.end_city, route.end_latitude, route.end_longitude
-            )
-            content["data"] = {
-                "route_name": route.name,
-                "start_city": route.start_city,
-                "end_city": route.end_city,
-                "start_weather": start_w.model_dump() if start_w else None,
-                "end_weather": end_w.model_dump() if end_w else None,
-                "alerts": [a.model_dump() for a in alert_check_start.alerts + alert_check_end.alerts],
-            }
+            content["data"] = await self._build_route_content(sub)
         elif sub.scope_type == "fleet":
-            from app.services.briefing import BriefingService
-            briefing_svc = BriefingService(self.db)
-            briefing = await briefing_svc.generate_fleet_briefing(sub.scope_id)
-            if not briefing:
-                return None
-            content["data"] = {
-                "briefing_id": briefing.id,
-                "summary": briefing.summary,
-                "alerts_count": briefing.alerts_count,
-                "details": briefing.details,
-            }
+            content["data"] = await self._build_fleet_content(sub)
         else:
             return None
         return content
+
+    async def _build_city_content(self, sub: models.WeatherSubscription) -> Dict[str, Any]:
+        city = crud.get_city(self.db, sub.scope_id)
+        if not city:
+            return {}
+        current = await self.weather_service.get_current_by_city(city.name)
+        forecast = await self.weather_service.get_forecast_by_city(city.name, days=3)
+        alert_check = await self.weather_service.check_alerts(city.name, city.latitude, city.longitude)
+        return {
+            "city": city.name,
+            "current": current.model_dump() if current else None,
+            "forecast_3d": [d.model_dump() for d in forecast.days] if forecast else [],
+            "alerts": [a.model_dump() for a in alert_check.alerts],
+        }
+
+    async def _build_route_content(self, sub: models.WeatherSubscription) -> Dict[str, Any]:
+        route = crud.get_route_segment(self.db, sub.scope_id)
+        if not route:
+            return {}
+        start_w, end_w = await asyncio.gather(
+            self.weather_service.get_current_by_city(route.start_city),
+            self.weather_service.get_current_by_city(route.end_city),
+        )
+        start_alerts, end_alerts = await asyncio.gather(
+            self.weather_service.check_alerts(route.start_city, route.start_latitude, route.start_longitude),
+            self.weather_service.check_alerts(route.end_city, route.end_latitude, route.end_longitude),
+        )
+        return {
+            "route_name": route.name,
+            "start_city": route.start_city,
+            "end_city": route.end_city,
+            "start_weather": start_w.model_dump() if start_w else None,
+            "end_weather": end_w.model_dump() if end_w else None,
+            "alerts": [a.model_dump() for a in start_alerts.alerts + end_alerts.alerts],
+        }
+
+    async def _build_fleet_content(self, sub: models.WeatherSubscription) -> Dict[str, Any]:
+        briefing_svc = BriefingService(self.db)
+        briefing = await briefing_svc.generate_fleet_briefing(sub.scope_id)
+        if not briefing:
+            return {}
+        return {
+            "briefing_id": briefing.id,
+            "summary": briefing.summary,
+            "alerts_count": briefing.alerts_count,
+            "details": briefing.details,
+        }

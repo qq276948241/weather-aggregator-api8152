@@ -1,6 +1,5 @@
-import httpx
 from datetime import datetime, date
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from app.providers.base import WeatherProvider
 from app.schemas.schemas import CurrentWeather, WeatherForecast, ForecastDay, WeatherHistoryRecord
 from app.config import settings
@@ -10,232 +9,131 @@ class QWeatherProvider(WeatherProvider):
     name = "qweather"
 
     def __init__(self):
-        self.api_key = settings.QWEATHER_API_KEY
-        self.base_url = settings.QWEATHER_BASE_URL
-        self._client = httpx.AsyncClient(timeout=15.0)
+        super().__init__(
+            api_key=settings.QWEATHER_API_KEY,
+            base_url=settings.QWEATHER_BASE_URL,
+        )
+
+    def _get_base_params(self) -> Dict[str, Any]:
+        return {"key": self.api_key}
+
+    def _check_response(self, data: Optional[Dict[str, Any]]) -> bool:
+        return data is not None and data.get("code") == "200"
+
+    def _parse_aqi_response(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not self._check_response(data):
+            return None
+        now = data["now"]
+        return {
+            "aqi": int(now.get("aqi", 0)),
+            "aqi_level": now.get("category"),
+            "pm2_5": float(now.get("pm2p5")) if now.get("pm2p5") else None,
+            "pm10": float(now.get("pm10")) if now.get("pm10") else None,
+            "so2": float(now.get("so2")) if now.get("so2") else None,
+            "no2": float(now.get("no2")) if now.get("no2") else None,
+            "co": float(now.get("co")) if now.get("co") else None,
+            "o3": float(now.get("o3")) if now.get("o3") else None,
+        }
+
+    def _parse_current_response(self, data: Dict[str, Any], location: str,
+                                 lat: float, lon: float) -> CurrentWeather:
+        now = data["now"]
+        return CurrentWeather(
+            location=location,
+            latitude=lat,
+            longitude=lon,
+            data_source=self.name,
+            observed_at=datetime.fromisoformat(data["updateTime"].replace("Z", "+00:00")),
+            temperature=float(now.get("temp")) if now.get("temp") else None,
+            humidity=int(now.get("humidity")) if now.get("humidity") else None,
+            wind_speed=float(now.get("windSpeed")) if now.get("windSpeed") else None,
+            wind_direction=now.get("windDir"),
+            precipitation=float(now.get("precip")) if now.get("precip") else 0,
+            pressure=float(now.get("pressure")) if now.get("pressure") else None,
+            weather_condition=now.get("text"),
+            feels_like=float(now.get("feelsLike")) if now.get("feelsLike") else None,
+            visibility=float(now.get("vis")) if now.get("vis") else None,
+        )
+
+    def _parse_forecast_response(self, data: Dict[str, Any], location: str,
+                                  lat: float, lon: float, days: int) -> WeatherForecast:
+        forecast_days: List[ForecastDay] = []
+        for item in data.get("daily", [])[:days]:
+            forecast_days.append(ForecastDay(
+                date=date.fromisoformat(item["fxDate"]),
+                latitude=lat,
+                longitude=lon,
+                temp_max=float(item.get("tempMax")) if item.get("tempMax") else None,
+                temp_min=float(item.get("tempMin")) if item.get("tempMin") else None,
+                weather_condition=item.get("textDay"),
+                wind_direction=item.get("windDirDay"),
+                wind_speed=float(item.get("windSpeedDay")) if item.get("windSpeedDay") else None,
+                humidity=int(item.get("humidity")) if item.get("humidity") else None,
+                precipitation=float(item.get("precip")) if item.get("precip") else 0,
+                precipitation_probability=int(item.get("pop")) if item.get("pop") else None,
+                pressure=float(item.get("pressure")) if item.get("pressure") else None,
+                sunrise=datetime.fromisoformat(item["sunrise"]) if item.get("sunrise") else None,
+                sunset=datetime.fromisoformat(item["sunset"]) if item.get("sunset") else None,
+            ))
+        return WeatherForecast(
+            location=location,
+            latitude=lat,
+            longitude=lon,
+            data_source=self.name,
+            days=forecast_days,
+        )
 
     async def _lookup_location(self, location: str) -> Optional[str]:
-        if not self.api_key:
-            return None
-        try:
-            params = {"location": location, "key": self.api_key}
-            resp = await self._client.get(f"{self.base_url}/city/lookup", params=params)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if data.get("code") == "200" and data.get("location"):
-                return data["location"][0]["id"]
-        except Exception:
-            pass
+        data = await self._api_get("/city/lookup", {"location": location})
+        if self._check_response(data) and data.get("location"):
+            return data["location"][0]["id"]
         return None
 
-    def _aqi_level(self, category: str) -> str:
-        mapping = {
-            "优": "优", "良": "良",
-            "轻度污染": "轻度污染", "中度污染": "中度污染",
-            "重度污染": "重度污染", "严重污染": "严重污染",
-        }
-        return mapping.get(category, category)
-
     async def get_aqi_by_coords(self, latitude: float, longitude: float) -> Optional[dict]:
-        if not self.api_key:
-            return None
-        try:
-            params = {"location": f"{longitude:.2f},{latitude:.2f}", "key": self.api_key}
-            resp = await self._client.get(f"{self.base_url}/air/now", params=params)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if data.get("code") != "200":
-                return None
-            now = data["now"]
-            aqi_val = int(now.get("aqi", 0))
-            return {
-                "aqi": aqi_val,
-                "aqi_level": now.get("category"),
-                "pm2_5": float(now.get("pm2p5")) if now.get("pm2p5") else None,
-                "pm10": float(now.get("pm10")) if now.get("pm10") else None,
-                "so2": float(now.get("so2")) if now.get("so2") else None,
-                "no2": float(now.get("no2")) if now.get("no2") else None,
-                "co": float(now.get("co")) if now.get("co") else None,
-                "o3": float(now.get("o3")) if now.get("o3") else None,
-            }
-        except Exception:
-            return None
+        data = await self._api_get("/air/now", {"location": f"{longitude:.2f},{latitude:.2f}"})
+        return self._parse_aqi_response(data)
 
     async def get_aqi_by_city(self, city: str, country: str = "CN") -> Optional[dict]:
-        if not self.api_key:
+        loc_id = await self._lookup_location(city)
+        if not loc_id:
             return None
-        try:
-            loc_id = await self._lookup_location(city)
-            if not loc_id:
-                return None
-            params = {"location": loc_id, "key": self.api_key}
-            resp = await self._client.get(f"{self.base_url}/air/now", params=params)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if data.get("code") != "200":
-                return None
-            now = data["now"]
-            aqi_val = int(now.get("aqi", 0))
-            return {
-                "aqi": aqi_val,
-                "aqi_level": now.get("category"),
-                "pm2_5": float(now.get("pm2p5")) if now.get("pm2p5") else None,
-                "pm10": float(now.get("pm10")) if now.get("pm10") else None,
-                "so2": float(now.get("so2")) if now.get("so2") else None,
-                "no2": float(now.get("no2")) if now.get("no2") else None,
-                "co": float(now.get("co")) if now.get("co") else None,
-                "o3": float(now.get("o3")) if now.get("o3") else None,
-            }
-        except Exception:
-            return None
+        data = await self._api_get("/air/now", {"location": loc_id})
+        return self._parse_aqi_response(data)
 
     async def get_current_by_city(self, city: str, country: str = "CN") -> Optional[CurrentWeather]:
-        if not self.api_key:
+        loc_id = await self._lookup_location(city)
+        if not loc_id:
             return None
-        try:
-            loc_id = await self._lookup_location(city)
-            if not loc_id:
-                return None
-            params = {"location": loc_id, "key": self.api_key}
-            resp = await self._client.get(f"{self.base_url}/weather/now", params=params)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if data.get("code") != "200":
-                return None
-            now = data["now"]
-            refer = data.get("location", {})
-            return CurrentWeather(
-                location=city,
-                latitude=float(refer.get("lat", 0)) if isinstance(refer, dict) else 0,
-                longitude=float(refer.get("lon", 0)) if isinstance(refer, dict) else 0,
-                data_source=self.name,
-                observed_at=datetime.fromisoformat(data["updateTime"].replace("Z", "+00:00")),
-                temperature=float(now.get("temp")) if now.get("temp") else None,
-                humidity=int(now.get("humidity")) if now.get("humidity") else None,
-                wind_speed=float(now.get("windSpeed")) if now.get("windSpeed") else None,
-                wind_direction=now.get("windDir"),
-                precipitation=float(now.get("precip")) if now.get("precip") else 0,
-                pressure=float(now.get("pressure")) if now.get("pressure") else None,
-                weather_condition=now.get("text"),
-                feels_like=float(now.get("feelsLike")) if now.get("feelsLike") else None,
-                visibility=float(now.get("vis")) if now.get("vis") else None,
-            )
-        except Exception:
+        data = await self._api_get("/weather/now", {"location": loc_id})
+        if not self._check_response(data):
             return None
+        refer = data.get("location", {})
+        lat = float(refer.get("lat", 0)) if isinstance(refer, dict) else 0
+        lon = float(refer.get("lon", 0)) if isinstance(refer, dict) else 0
+        return self._parse_current_response(data, city, lat, lon)
 
     async def get_current_by_coords(self, latitude: float, longitude: float) -> Optional[CurrentWeather]:
-        if not self.api_key:
+        data = await self._api_get("/weather/now", {"location": f"{longitude:.2f},{latitude:.2f}"})
+        if not self._check_response(data):
             return None
-        try:
-            params = {"location": f"{longitude:.2f},{latitude:.2f}", "key": self.api_key}
-            resp = await self._client.get(f"{self.base_url}/weather/now", params=params)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if data.get("code") != "200":
-                return None
-            now = data["now"]
-            return CurrentWeather(
-                location=f"({latitude:.2f}, {longitude:.2f})",
-                latitude=latitude,
-                longitude=longitude,
-                data_source=self.name,
-                observed_at=datetime.fromisoformat(data["updateTime"].replace("Z", "+00:00")),
-                temperature=float(now.get("temp")) if now.get("temp") else None,
-                humidity=int(now.get("humidity")) if now.get("humidity") else None,
-                wind_speed=float(now.get("windSpeed")) if now.get("windSpeed") else None,
-                wind_direction=now.get("windDir"),
-                precipitation=float(now.get("precip")) if now.get("precip") else 0,
-                pressure=float(now.get("pressure")) if now.get("pressure") else None,
-                weather_condition=now.get("text"),
-                feels_like=float(now.get("feelsLike")) if now.get("feelsLike") else None,
-                visibility=float(now.get("vis")) if now.get("vis") else None,
-            )
-        except Exception:
-            return None
+        return self._parse_current_response(data, f"({latitude:.2f}, {longitude:.2f})", latitude, longitude)
 
     async def get_forecast_by_city(self, city: str, days: int = 7, country: str = "CN") -> Optional[WeatherForecast]:
-        if not self.api_key:
+        loc_id = await self._lookup_location(city)
+        if not loc_id:
             return None
-        try:
-            loc_id = await self._lookup_location(city)
-            if not loc_id:
-                return None
-            endpoint = f"{self.base_url}/weather/3d" if days <= 3 else f"{self.base_url}/weather/7d"
-            params = {"location": loc_id, "key": self.api_key}
-            resp = await self._client.get(endpoint, params=params)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if data.get("code") != "200":
-                return None
-            forecast_days: List[ForecastDay] = []
-            for item in data.get("daily", [])[:days]:
-                forecast_days.append(ForecastDay(
-                    date=date.fromisoformat(item["fxDate"]),
-                    temp_max=float(item.get("tempMax")) if item.get("tempMax") else None,
-                    temp_min=float(item.get("tempMin")) if item.get("tempMin") else None,
-                    weather_condition=item.get("textDay"),
-                    wind_direction=item.get("windDirDay"),
-                    wind_speed=float(item.get("windSpeedDay")) if item.get("windSpeedDay") else None,
-                    humidity=int(item.get("humidity")) if item.get("humidity") else None,
-                    precipitation=float(item.get("precip")) if item.get("precip") else 0,
-                    precipitation_probability=int(item.get("pop")) if item.get("pop") else None,
-                    pressure=float(item.get("pressure")) if item.get("pressure") else None,
-                    sunrise=datetime.fromisoformat(item["sunrise"]) if item.get("sunrise") else None,
-                    sunset=datetime.fromisoformat(item["sunset"]) if item.get("sunset") else None,
-                ))
-            return WeatherForecast(
-                location=city,
-                latitude=0,
-                longitude=0,
-                data_source=self.name,
-                days=forecast_days,
-            )
-        except Exception:
+        endpoint = "/weather/3d" if days <= 3 else "/weather/7d"
+        data = await self._api_get(endpoint, {"location": loc_id})
+        if not self._check_response(data):
             return None
+        return self._parse_forecast_response(data, city, 0, 0, days)
 
     async def get_forecast_by_coords(self, latitude: float, longitude: float, days: int = 7) -> Optional[WeatherForecast]:
-        if not self.api_key:
+        endpoint = "/weather/3d" if days <= 3 else "/weather/7d"
+        data = await self._api_get(endpoint, {"location": f"{longitude:.2f},{latitude:.2f}"})
+        if not self._check_response(data):
             return None
-        try:
-            endpoint = f"{self.base_url}/weather/3d" if days <= 3 else f"{self.base_url}/weather/7d"
-            params = {"location": f"{longitude:.2f},{latitude:.2f}", "key": self.api_key}
-            resp = await self._client.get(endpoint, params=params)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if data.get("code") != "200":
-                return None
-            forecast_days: List[ForecastDay] = []
-            for item in data.get("daily", [])[:days]:
-                forecast_days.append(ForecastDay(
-                    date=date.fromisoformat(item["fxDate"]),
-                    temp_max=float(item.get("tempMax")) if item.get("tempMax") else None,
-                    temp_min=float(item.get("tempMin")) if item.get("tempMin") else None,
-                    weather_condition=item.get("textDay"),
-                    wind_direction=item.get("windDirDay"),
-                    wind_speed=float(item.get("windSpeedDay")) if item.get("windSpeedDay") else None,
-                    humidity=int(item.get("humidity")) if item.get("humidity") else None,
-                    precipitation=float(item.get("precip")) if item.get("precip") else 0,
-                    precipitation_probability=int(item.get("pop")) if item.get("pop") else None,
-                    pressure=float(item.get("pressure")) if item.get("pressure") else None,
-                    sunrise=datetime.fromisoformat(item["sunrise"]) if item.get("sunrise") else None,
-                    sunset=datetime.fromisoformat(item["sunset"]) if item.get("sunset") else None,
-                ))
-            return WeatherForecast(
-                location=f"({latitude:.2f}, {longitude:.2f})",
-                latitude=latitude,
-                longitude=longitude,
-                data_source=self.name,
-                days=forecast_days,
-            )
-        except Exception:
-            return None
+        return self._parse_forecast_response(data, f"({latitude:.2f}, {longitude:.2f})", latitude, longitude, days)
 
     async def get_history_by_city(self, city: str, start_date: date, end_date: date,
                                   country: str = "CN") -> List[WeatherHistoryRecord]:
@@ -248,9 +146,5 @@ class QWeatherProvider(WeatherProvider):
     async def is_available(self) -> bool:
         if not self.api_key:
             return False
-        try:
-            params = {"location": "101010100", "key": self.api_key}
-            resp = await self._client.get(f"{self.base_url}/weather/now", params=params, timeout=5.0)
-            return resp.status_code == 200
-        except Exception:
-            return False
+        data = await self._api_get("/weather/now", {"location": "101010100"}, timeout=5.0, max_retries=1)
+        return self._check_response(data)

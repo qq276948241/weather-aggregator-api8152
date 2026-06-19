@@ -9,6 +9,9 @@ from app.schemas.schemas import CurrentWeather, WeatherForecast, ForecastDay, We
 class MockWeatherProvider(WeatherProvider):
     name = "mock"
 
+    def __init__(self):
+        super().__init__(api_key=None, base_url=None)
+
     def _seed_from(self, *parts) -> int:
         key = ":".join(str(p) for p in parts)
         return int(hashlib.md5(key.encode()).hexdigest(), 16) % (2**32)
