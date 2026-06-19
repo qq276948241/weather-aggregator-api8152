@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from app.providers.base import WeatherProvider
 from app.schemas.schemas import CurrentWeather, WeatherForecast, ForecastDay, WeatherHistoryRecord
 from app.config import settings
@@ -83,33 +83,38 @@ class QWeatherProvider(WeatherProvider):
             days=forecast_days,
         )
 
-    async def _lookup_location(self, location: str) -> Optional[str]:
+    async def _lookup_location(self, location: str) -> Optional[Tuple[str, float, float]]:
         data = await self._api_get("/city/lookup", {"location": location})
-        if self._check_response(data) and data.get("location"):
-            return data["location"][0]["id"]
-        return None
+        if not self._check_response(data) or not data.get("location"):
+            return None
+        loc = data["location"][0]
+        loc_id = loc.get("id")
+        if not loc_id:
+            return None
+        lat = float(loc.get("lat", 0)) if loc.get("lat") else 0.0
+        lon = float(loc.get("lon", 0)) if loc.get("lon") else 0.0
+        return loc_id, lat, lon
 
     async def get_aqi_by_coords(self, latitude: float, longitude: float) -> Optional[dict]:
         data = await self._api_get("/air/now", {"location": f"{longitude:.2f},{latitude:.2f}"})
         return self._parse_aqi_response(data)
 
     async def get_aqi_by_city(self, city: str, country: str = "CN") -> Optional[dict]:
-        loc_id = await self._lookup_location(city)
-        if not loc_id:
+        lookup = await self._lookup_location(city)
+        if not lookup:
             return None
+        loc_id = lookup[0]
         data = await self._api_get("/air/now", {"location": loc_id})
         return self._parse_aqi_response(data)
 
     async def get_current_by_city(self, city: str, country: str = "CN") -> Optional[CurrentWeather]:
-        loc_id = await self._lookup_location(city)
-        if not loc_id:
+        lookup = await self._lookup_location(city)
+        if not lookup:
             return None
+        loc_id, lat, lon = lookup
         data = await self._api_get("/weather/now", {"location": loc_id})
         if not self._check_response(data):
             return None
-        refer = data.get("location", {})
-        lat = float(refer.get("lat", 0)) if isinstance(refer, dict) else 0
-        lon = float(refer.get("lon", 0)) if isinstance(refer, dict) else 0
         return self._parse_current_response(data, city, lat, lon)
 
     async def get_current_by_coords(self, latitude: float, longitude: float) -> Optional[CurrentWeather]:
@@ -119,14 +124,15 @@ class QWeatherProvider(WeatherProvider):
         return self._parse_current_response(data, f"({latitude:.2f}, {longitude:.2f})", latitude, longitude)
 
     async def get_forecast_by_city(self, city: str, days: int = 7, country: str = "CN") -> Optional[WeatherForecast]:
-        loc_id = await self._lookup_location(city)
-        if not loc_id:
+        lookup = await self._lookup_location(city)
+        if not lookup:
             return None
+        loc_id, lat, lon = lookup
         endpoint = "/weather/3d" if days <= 3 else "/weather/7d"
         data = await self._api_get(endpoint, {"location": loc_id})
         if not self._check_response(data):
             return None
-        return self._parse_forecast_response(data, city, 0, 0, days)
+        return self._parse_forecast_response(data, city, lat, lon, days)
 
     async def get_forecast_by_coords(self, latitude: float, longitude: float, days: int = 7) -> Optional[WeatherForecast]:
         endpoint = "/weather/3d" if days <= 3 else "/weather/7d"

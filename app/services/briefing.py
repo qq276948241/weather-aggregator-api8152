@@ -111,16 +111,16 @@ class BriefingService:
 
     async def _fetch_route_data(self, route: models.RouteSegment) -> RouteRawData:
         start_w, end_w = await asyncio.gather(
-            self.weather_service.get_current_by_city(route.start_city, include_aqi=True),
-            self.weather_service.get_current_by_city(route.end_city, include_aqi=True),
+            self._safe_get_current(route.start_city),
+            self._safe_get_current(route.end_city),
         )
         start_fc, end_fc = await asyncio.gather(
-            self.weather_service.get_forecast_by_city(route.start_city, days=3),
-            self.weather_service.get_forecast_by_city(route.end_city, days=3),
+            self._safe_get_forecast(route.start_city),
+            self._safe_get_forecast(route.end_city),
         )
         start_alerts, end_alerts = await asyncio.gather(
-            self.weather_service.check_alerts(route.start_city, route.start_latitude, route.start_longitude),
-            self.weather_service.check_alerts(route.end_city, route.end_latitude, route.end_longitude),
+            self._safe_check_alerts(route.start_city, route.start_latitude, route.start_longitude),
+            self._safe_check_alerts(route.end_city, route.end_latitude, route.end_longitude),
         )
         return RouteRawData(
             start_weather=start_w,
@@ -131,8 +131,35 @@ class BriefingService:
             end_alerts=end_alerts,
         )
 
+    async def _safe_get_current(self, city: str) -> Optional[CurrentWeather]:
+        try:
+            return await self.weather_service.get_current_by_city(city, include_aqi=True)
+        except Exception as e:
+            logger.error(f"Failed to get current weather for {city}: {e}")
+            return None
+
+    async def _safe_get_forecast(self, city: str) -> Optional[WeatherForecast]:
+        try:
+            return await self.weather_service.get_forecast_by_city(city, days=3)
+        except Exception as e:
+            logger.error(f"Failed to get forecast for {city}: {e}")
+            return None
+
+    async def _safe_check_alerts(self, city: str, lat: Optional[float],
+                                  lon: Optional[float]) -> WeatherAlertCheck:
+        try:
+            return await self.weather_service.check_alerts(city, lat, lon)
+        except Exception as e:
+            logger.error(f"Failed to check alerts for {city}: {e}")
+            return WeatherAlertCheck(
+                location=city, latitude=lat, longitude=lon,
+                triggered=False, alerts=[],
+            )
+
     def _assess_risk(self, route: models.RouteSegment, data: RouteRawData) -> RiskAssessment:
-        alerts_count = len(data.start_alerts.alerts) + len(data.end_alerts.alerts)
+        start_alerts = data.start_alerts.alerts if data.start_alerts else []
+        end_alerts = data.end_alerts.alerts if data.end_alerts else []
+        alerts_count = len(start_alerts) + len(end_alerts)
         start_aqi = self._extract_air_quality(data.start_weather, route.start_city)
         end_aqi = self._extract_air_quality(data.end_weather, route.end_city)
         air_quality_warning = start_aqi.has_warning or end_aqi.has_warning

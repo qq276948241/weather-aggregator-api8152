@@ -62,7 +62,10 @@ class WeatherService:
             result.o3 = None
         if result:
             if use_cache:
-                self.cache.set(cache_key, result)
+                if include_aqi and result.aqi is None:
+                    logger.debug(f"Skipping cache for city {city}: AQI not available but requested")
+                else:
+                    self.cache.set(cache_key, result)
             return result
         if last_error:
             logger.error(f"All providers failed for city {city}: {last_error}")
@@ -111,7 +114,10 @@ class WeatherService:
             result.o3 = None
         if result:
             if use_cache:
-                self.cache.set(cache_key, result)
+                if include_aqi and result.aqi is None:
+                    logger.debug(f"Skipping cache for coords {latitude},{longitude}: AQI not available but requested")
+                else:
+                    self.cache.set(cache_key, result)
             return result
         if last_error:
             logger.error(f"All providers failed for coords {latitude},{longitude}: {last_error}")
@@ -205,7 +211,10 @@ class WeatherService:
                 day.o3 = None
         if result:
             if use_cache:
-                self.cache.set(cache_key, result)
+                if include_aqi and result.days and all(d.aqi is None for d in result.days):
+                    logger.debug(f"Skipping cache for forecast {city}: AQI not available but requested")
+                else:
+                    self.cache.set(cache_key, result)
             return result
         if last_error:
             logger.error(f"All providers forecast failed for city {city}: {last_error}")
@@ -257,7 +266,10 @@ class WeatherService:
                 day.o3 = None
         if result:
             if use_cache:
-                self.cache.set(cache_key, result)
+                if include_aqi and result.days and all(d.aqi is None for d in result.days):
+                    logger.debug(f"Skipping cache for forecast coords: AQI not available but requested")
+                else:
+                    self.cache.set(cache_key, result)
             return result
         if last_error:
             logger.error(f"All providers forecast failed: {last_error}")
