@@ -18,10 +18,12 @@ async def get_current_by_city(
     country: str = Query("CN", description="国家代码"),
     provider: Optional[str] = Query(None, description="指定数据源，如mock/openweathermap/qweather"),
     use_cache: bool = Query(True, description="是否使用缓存"),
+    include_aqi: bool = Query(True, description="是否包含空气质量数据"),
     db: Session = Depends(get_db),
 ):
     svc = WeatherService(db)
-    result = await svc.get_current_by_city(city, provider_name=provider, use_cache=use_cache)
+    result = await svc.get_current_by_city(city, provider_name=provider,
+                                            use_cache=use_cache, include_aqi=include_aqi)
     if result is None:
         raise HTTPException(status_code=404, detail="无法获取当前天气数据，请检查城市名或数据源配置")
     return result
@@ -33,12 +35,43 @@ async def get_current_by_coords(
     longitude: float = Query(..., description="经度"),
     provider: Optional[str] = Query(None, description="指定数据源"),
     use_cache: bool = Query(True, description="是否使用缓存"),
+    include_aqi: bool = Query(True, description="是否包含空气质量数据"),
     db: Session = Depends(get_db),
 ):
     svc = WeatherService(db)
-    result = await svc.get_current_by_coords(latitude, longitude, provider_name=provider, use_cache=use_cache)
+    result = await svc.get_current_by_coords(latitude, longitude, provider_name=provider,
+                                              use_cache=use_cache, include_aqi=include_aqi)
     if result is None:
         raise HTTPException(status_code=404, detail="无法获取当前天气数据")
+    return result
+
+
+@router.get("/aqi/city")
+async def get_aqi_by_city(
+    city: str = Query(..., description="城市名称"),
+    provider: Optional[str] = Query(None, description="指定数据源"),
+    use_cache: bool = Query(True, description="是否使用缓存"),
+    db: Session = Depends(get_db),
+):
+    svc = WeatherService(db)
+    result = await svc.get_aqi_by_city(city, provider_name=provider, use_cache=use_cache)
+    if result is None:
+        raise HTTPException(status_code=404, detail="无法获取空气质量数据")
+    return result
+
+
+@router.get("/aqi/coords")
+async def get_aqi_by_coords(
+    latitude: float = Query(..., description="纬度"),
+    longitude: float = Query(..., description="经度"),
+    provider: Optional[str] = Query(None, description="指定数据源"),
+    use_cache: bool = Query(True, description="是否使用缓存"),
+    db: Session = Depends(get_db),
+):
+    svc = WeatherService(db)
+    result = await svc.get_aqi_by_coords(latitude, longitude, provider_name=provider, use_cache=use_cache)
+    if result is None:
+        raise HTTPException(status_code=404, detail="无法获取空气质量数据")
     return result
 
 
@@ -48,10 +81,12 @@ async def get_forecast_by_city(
     days: int = Query(7, ge=1, le=15, description="预报天数"),
     provider: Optional[str] = Query(None, description="指定数据源"),
     use_cache: bool = Query(True, description="是否使用缓存"),
+    include_aqi: bool = Query(True, description="是否包含空气质量数据"),
     db: Session = Depends(get_db),
 ):
     svc = WeatherService(db)
-    result = await svc.get_forecast_by_city(city, days=days, provider_name=provider, use_cache=use_cache)
+    result = await svc.get_forecast_by_city(city, days=days, provider_name=provider,
+                                            use_cache=use_cache, include_aqi=include_aqi)
     if result is None:
         raise HTTPException(status_code=404, detail="无法获取天气预报数据")
     return result
@@ -64,10 +99,12 @@ async def get_forecast_by_coords(
     days: int = Query(7, ge=1, le=15, description="预报天数"),
     provider: Optional[str] = Query(None, description="指定数据源"),
     use_cache: bool = Query(True, description="是否使用缓存"),
+    include_aqi: bool = Query(True, description="是否包含空气质量数据"),
     db: Session = Depends(get_db),
 ):
     svc = WeatherService(db)
-    result = await svc.get_forecast_by_coords(latitude, longitude, days=days, provider_name=provider, use_cache=use_cache)
+    result = await svc.get_forecast_by_coords(latitude, longitude, days=days, provider_name=provider,
+                                              use_cache=use_cache, include_aqi=include_aqi)
     if result is None:
         raise HTTPException(status_code=404, detail="无法获取天气预报数据")
     return result

@@ -50,16 +50,41 @@ class BriefingService:
             "end_city": route.end_city,
             "start_weather": None,
             "end_weather": None,
+            "start_air_quality": None,
+            "end_air_quality": None,
+            "air_quality_warning": False,
             "forecast": [],
             "alerts_count": 0,
             "risk_level": "low",
             "recommendation": "",
         }
         try:
-            start_w = await self.weather_service.get_current_by_city(route.start_city)
+            start_w = await self.weather_service.get_current_by_city(route.start_city, include_aqi=True)
             result["start_weather"] = start_w.model_dump() if start_w else None
-            end_w = await self.weather_service.get_current_by_city(route.end_city)
+            end_w = await self.weather_service.get_current_by_city(route.end_city, include_aqi=True)
             result["end_weather"] = end_w.model_dump() if end_w else None
+            aqi_warnings = []
+            if start_w and start_w.aqi is not None:
+                result["start_air_quality"] = {
+                    "aqi": start_w.aqi,
+                    "aqi_level": start_w.aqi_level,
+                    "pm2_5": start_w.pm2_5,
+                    "pm10": start_w.pm10,
+                }
+                if start_w.aqi > 150:
+                    aqi_warnings.append(f"{route.start_city} AQI={start_w.aqi}({start_w.aqi_level})，已达中度污染及以上")
+            if end_w and end_w.aqi is not None:
+                result["end_air_quality"] = {
+                    "aqi": end_w.aqi,
+                    "aqi_level": end_w.aqi_level,
+                    "pm2_5": end_w.pm2_5,
+                    "pm10": end_w.pm10,
+                }
+                if end_w.aqi > 150:
+                    aqi_warnings.append(f"{route.end_city} AQI={end_w.aqi}({end_w.aqi_level})，已达中度污染及以上")
+            if aqi_warnings:
+                result["air_quality_warning"] = True
+                result["aqi_warning_detail"] = " | ".join(aqi_warnings)
             start_fc = await self.weather_service.get_forecast_by_city(route.start_city, days=3)
             if start_fc:
                 result["forecast"].append({"city": route.start_city,
@@ -75,15 +100,28 @@ class BriefingService:
                 route.end_city, route.end_latitude, route.end_longitude
             )
             result["alerts_count"] = len(alert_check_start.alerts) + len(alert_check_end.alerts)
+            all_recommendations = []
             if result["alerts_count"] > 0:
                 result["risk_level"] = "high"
-                result["recommendation"] = "建议调整运输计划或加强温湿度监控，必要时改道行驶"
+                all_recommendations.append("建议调整运输计划或加强温湿度监控，必要时改道行驶")
             elif self._forecast_has_risk(start_fc) or self._forecast_has_risk(end_fc):
-                result["risk_level"] = "medium"
-                result["recommendation"] = "未来三天有天气变化风险，请保持关注并准备应急方案"
+                if result["risk_level"] != "high":
+                    result["risk_level"] = "medium"
+                all_recommendations.append("未来三天有天气变化风险，请保持关注并准备应急方案")
+            if result["air_quality_warning"]:
+                if result["risk_level"] != "high":
+                    result["risk_level"] = "medium"
+                aqi_msg_parts = []
+                if start_w and start_w.aqi and start_w.aqi > 150:
+                    aqi_msg_parts.append(f"【{route.start_city} AQI={start_w.aqi} 红色预警】请关闭车窗减少通风")
+                if end_w and end_w.aqi and end_w.aqi > 150:
+                    aqi_msg_parts.append(f"【{route.end_city} AQI={end_w.aqi} 红色预警】请关闭车窗减少通风")
+                aqi_msg_parts.append("加强冷链货箱密封，防止外部污染空气进入影响生鲜品质")
+                all_recommendations.extend(aqi_msg_parts)
+            if not all_recommendations:
+                result["recommendation"] = "沿途天气及空气质量良好，适合冷链运输，按原计划执行即可"
             else:
-                result["risk_level"] = "low"
-                result["recommendation"] = "沿途天气良好，适合冷链运输，按原计划执行即可"
+                result["recommendation"] = " | ".join(all_recommendations)
         except Exception as e:
             logger.error(f"Failed to analyze route {route.id}: {e}")
         return result
@@ -104,29 +142,36 @@ class BriefingService:
         route_count = len(details.get("routes", []))
         high_risk = sum(1 for r in details.get("routes", []) if r.get("risk_level") == "high")
         medium_risk = sum(1 for r in details.get("routes", []) if r.get("risk_level") == "medium")
+        aqi_warning_routes = sum(1 for r in details.get("routes", []) if r.get("air_quality_warning"))
         parts = [
             f"【{fleet_name}】{b_date.isoformat()} 冷链运输天气简报",
             f"共覆盖 {route_count} 条运输路线。",
         ]
         if alerts_count > 0:
             parts.append(f"当前触发 {alerts_count} 条气象预警，")
+        if aqi_warning_routes > 0:
+            parts.append(f"{aqi_warning_routes} 条路线沿途 AQI 超标需注意，")
         if high_risk > 0:
             parts.append(f"其中 {high_risk} 条路线为高风险，")
         if medium_risk > 0:
             parts.append(f"{medium_risk} 条路线为中风险。")
-        if high_risk == 0 and medium_risk == 0 and alerts_count == 0:
-            parts.append("所有路线天气良好，适合冷链运输。")
+        if high_risk == 0 and medium_risk == 0 and alerts_count == 0 and aqi_warning_routes == 0:
+            parts.append("所有路线天气及空气质量良好，适合冷链运输。")
         else:
             parts.append("请重点关注高风险路段，合理安排运输时间和应急预案。")
         return "".join(parts)
 
     def _build_summary_points(self, details: Dict[str, Any], alerts_count: int) -> List[str]:
         points = []
+        aqi_points = []
         for r in details.get("routes", []):
-            if r.get("risk_level") != "low":
+            if r.get("air_quality_warning") and r.get("aqi_warning_detail"):
+                aqi_points.append(f"{r['route_name']}: 【空气质量预警】{r['aqi_warning_detail']}。请关闭车窗减少通风，加强货箱密封。")
+            if r.get("risk_level") != "low" and not r.get("air_quality_warning"):
                 points.append(f"{r['route_name']}: {r.get('recommendation', '')}")
+        points.extend(aqi_points)
         if not points and alerts_count == 0:
-            points.append("所有路线天气状况良好，冷链运输可正常进行。")
+            points.append("所有路线天气及空气质量良好，冷链运输可正常进行。")
         return points
 
     async def generate_all_fleet_briefings(self) -> List[models.WeatherBriefing]:

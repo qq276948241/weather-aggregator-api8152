@@ -21,99 +21,244 @@ class WeatherService:
         self.cache = get_cache()
 
     async def get_current_by_city(self, city: str, provider_name: Optional[str] = None,
-                                  use_cache: bool = True) -> Optional[CurrentWeather]:
-        cache_key = make_cache_key("weather", "current", "city", city, provider=provider_name or "all")
+                                  use_cache: bool = True,
+                                  include_aqi: bool = True) -> Optional[CurrentWeather]:
+        cache_key = make_cache_key("weather", "current", "city", city,
+                                    provider=provider_name or "all", aqi=str(include_aqi))
         if use_cache:
             cached = self.cache.get(cache_key)
             if cached:
                 return cached
         providers = self._get_providers(provider_name)
         last_error = None
+        result = None
+        used_provider = None
         for p in providers:
             try:
                 result = await p.get_current_by_city(city)
                 if result:
-                    if use_cache:
-                        self.cache.set(cache_key, result)
-                    return result
+                    used_provider = p
+                    break
             except Exception as e:
                 last_error = e
                 logger.warning(f"Provider {p.name} failed for city {city}: {e}")
+        if result and include_aqi and result.aqi is None and used_provider:
+            try:
+                aqi_data = await used_provider.get_aqi_by_coords(result.latitude, result.longitude)
+                if aqi_data:
+                    for k, v in aqi_data.items():
+                        if hasattr(result, k) and v is not None:
+                            setattr(result, k, v)
+            except Exception as e:
+                logger.warning(f"Failed to fetch AQI for city {city}: {e}")
+        elif result and not include_aqi:
+            result.aqi = None
+            result.aqi_level = None
+            result.pm2_5 = None
+            result.pm10 = None
+            result.so2 = None
+            result.no2 = None
+            result.co = None
+            result.o3 = None
+        if result:
+            if use_cache:
+                self.cache.set(cache_key, result)
+            return result
         if last_error:
             logger.error(f"All providers failed for city {city}: {last_error}")
         return None
 
     async def get_current_by_coords(self, latitude: float, longitude: float,
                                     provider_name: Optional[str] = None,
-                                    use_cache: bool = True) -> Optional[CurrentWeather]:
+                                    use_cache: bool = True,
+                                    include_aqi: bool = True) -> Optional[CurrentWeather]:
         cache_key = make_cache_key("weather", "current", "coords", f"{latitude:.4f}", f"{longitude:.4f}",
-                                    provider=provider_name or "all")
+                                    provider=provider_name or "all", aqi=str(include_aqi))
         if use_cache:
             cached = self.cache.get(cache_key)
             if cached:
                 return cached
         providers = self._get_providers(provider_name)
         last_error = None
+        result = None
+        used_provider = None
         for p in providers:
             try:
                 result = await p.get_current_by_coords(latitude, longitude)
                 if result:
-                    if use_cache:
-                        self.cache.set(cache_key, result)
-                    return result
+                    used_provider = p
+                    break
             except Exception as e:
                 last_error = e
                 logger.warning(f"Provider {p.name} failed for coords {latitude},{longitude}: {e}")
+        if result and include_aqi and result.aqi is None and used_provider:
+            try:
+                aqi_data = await used_provider.get_aqi_by_coords(latitude, longitude)
+                if aqi_data:
+                    for k, v in aqi_data.items():
+                        if hasattr(result, k) and v is not None:
+                            setattr(result, k, v)
+            except Exception as e:
+                logger.warning(f"Failed to fetch AQI for coords {latitude},{longitude}: {e}")
+        elif result and not include_aqi:
+            result.aqi = None
+            result.aqi_level = None
+            result.pm2_5 = None
+            result.pm10 = None
+            result.so2 = None
+            result.no2 = None
+            result.co = None
+            result.o3 = None
+        if result:
+            if use_cache:
+                self.cache.set(cache_key, result)
+            return result
         if last_error:
             logger.error(f"All providers failed for coords {latitude},{longitude}: {last_error}")
         return None
 
-    async def get_forecast_by_city(self, city: str, days: int = 7,
-                                   provider_name: Optional[str] = None,
-                                   use_cache: bool = True) -> Optional[WeatherForecast]:
-        cache_key = make_cache_key("weather", "forecast", "city", city, days=str(days),
+    async def get_aqi_by_city(self, city: str, provider_name: Optional[str] = None,
+                               use_cache: bool = True) -> Optional[dict]:
+        cache_key = make_cache_key("weather", "aqi", "city", city, provider=provider_name or "all")
+        if use_cache:
+            cached = self.cache.get(cache_key)
+            if cached:
+                return cached
+        providers = self._get_providers(provider_name)
+        for p in providers:
+            try:
+                result = await p.get_aqi_by_city(city)
+                if result:
+                    if use_cache:
+                        self.cache.set(cache_key, result)
+                    return result
+            except Exception as e:
+                logger.warning(f"Provider {p.name} AQI failed for city {city}: {e}")
+        return None
+
+    async def get_aqi_by_coords(self, latitude: float, longitude: float,
+                                 provider_name: Optional[str] = None,
+                                 use_cache: bool = True) -> Optional[dict]:
+        cache_key = make_cache_key("weather", "aqi", "coords", f"{latitude:.4f}", f"{longitude:.4f}",
                                     provider=provider_name or "all")
         if use_cache:
             cached = self.cache.get(cache_key)
             if cached:
                 return cached
         providers = self._get_providers(provider_name)
-        last_error = None
         for p in providers:
             try:
-                result = await p.get_forecast_by_city(city, days=days)
+                result = await p.get_aqi_by_coords(latitude, longitude)
                 if result:
                     if use_cache:
                         self.cache.set(cache_key, result)
                     return result
             except Exception as e:
+                logger.warning(f"Provider {p.name} AQI failed for coords {latitude},{longitude}: {e}")
+        return None
+
+    async def get_forecast_by_city(self, city: str, days: int = 7,
+                                   provider_name: Optional[str] = None,
+                                   use_cache: bool = True,
+                                   include_aqi: bool = True) -> Optional[WeatherForecast]:
+        cache_key = make_cache_key("weather", "forecast", "city", city, days=str(days),
+                                    provider=provider_name or "all", aqi=str(include_aqi))
+        if use_cache:
+            cached = self.cache.get(cache_key)
+            if cached:
+                return cached
+        providers = self._get_providers(provider_name)
+        last_error = None
+        result = None
+        used_provider = None
+        for p in providers:
+            try:
+                result = await p.get_forecast_by_city(city, days=days)
+                if result:
+                    used_provider = p
+                    break
+            except Exception as e:
                 last_error = e
                 logger.warning(f"Provider {p.name} forecast failed for city {city}: {e}")
+        if result and include_aqi and used_provider:
+            try:
+                first_day = result.days[0] if result.days else None
+                if first_day and first_day.latitude is not None and first_day.longitude is not None:
+                    aqi_data = await used_provider.get_aqi_by_coords(first_day.latitude, first_day.longitude)
+                    if aqi_data:
+                        for day in result.days:
+                            if day.aqi is None:
+                                for k, v in aqi_data.items():
+                                    if hasattr(day, k) and v is not None:
+                                        setattr(day, k, v)
+            except Exception as e:
+                logger.warning(f"Failed to fetch AQI for forecast {city}: {e}")
+        elif result and not include_aqi:
+            for day in result.days:
+                day.aqi = None
+                day.aqi_level = None
+                day.pm2_5 = None
+                day.pm10 = None
+                day.so2 = None
+                day.no2 = None
+                day.co = None
+                day.o3 = None
+        if result:
+            if use_cache:
+                self.cache.set(cache_key, result)
+            return result
         if last_error:
             logger.error(f"All providers forecast failed for city {city}: {last_error}")
         return None
 
     async def get_forecast_by_coords(self, latitude: float, longitude: float, days: int = 7,
                                      provider_name: Optional[str] = None,
-                                     use_cache: bool = True) -> Optional[WeatherForecast]:
+                                     use_cache: bool = True,
+                                     include_aqi: bool = True) -> Optional[WeatherForecast]:
         cache_key = make_cache_key("weather", "forecast", "coords", f"{latitude:.4f}", f"{longitude:.4f}",
-                                    days=str(days), provider=provider_name or "all")
+                                    days=str(days), provider=provider_name or "all", aqi=str(include_aqi))
         if use_cache:
             cached = self.cache.get(cache_key)
             if cached:
                 return cached
         providers = self._get_providers(provider_name)
         last_error = None
+        result = None
+        used_provider = None
         for p in providers:
             try:
                 result = await p.get_forecast_by_coords(latitude, longitude, days=days)
                 if result:
-                    if use_cache:
-                        self.cache.set(cache_key, result)
-                    return result
+                    used_provider = p
+                    break
             except Exception as e:
                 last_error = e
                 logger.warning(f"Provider {p.name} forecast failed: {e}")
+        if result and include_aqi and used_provider:
+            try:
+                aqi_data = await used_provider.get_aqi_by_coords(latitude, longitude)
+                if aqi_data:
+                    for day in result.days:
+                        if day.aqi is None:
+                            for k, v in aqi_data.items():
+                                if hasattr(day, k) and v is not None:
+                                    setattr(day, k, v)
+            except Exception as e:
+                logger.warning(f"Failed to fetch AQI for forecast coords: {e}")
+        elif result and not include_aqi:
+            for day in result.days:
+                day.aqi = None
+                day.aqi_level = None
+                day.pm2_5 = None
+                day.pm10 = None
+                day.so2 = None
+                day.no2 = None
+                day.co = None
+                day.o3 = None
+        if result:
+            if use_cache:
+                self.cache.set(cache_key, result)
+            return result
         if last_error:
             logger.error(f"All providers forecast failed: {last_error}")
         return None

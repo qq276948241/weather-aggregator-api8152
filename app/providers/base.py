@@ -1,5 +1,5 @@
 import abc
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import date
 from app.schemas.schemas import CurrentWeather, WeatherForecast, WeatherHistoryRecord
 
@@ -14,6 +14,13 @@ class WeatherProvider(abc.ABC):
     @abc.abstractmethod
     async def get_current_by_coords(self, latitude: float, longitude: float) -> Optional[CurrentWeather]:
         ...
+
+    @abc.abstractmethod
+    async def get_aqi_by_coords(self, latitude: float, longitude: float) -> Optional[Dict[str, Any]]:
+        ...
+
+    async def get_aqi_by_city(self, city: str, country: str = "CN") -> Optional[Dict[str, Any]]:
+        return None
 
     @abc.abstractmethod
     async def get_forecast_by_city(self, city: str, days: int = 7, country: str = "CN") -> Optional[WeatherForecast]:

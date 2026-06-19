@@ -29,6 +29,69 @@ class QWeatherProvider(WeatherProvider):
             pass
         return None
 
+    def _aqi_level(self, category: str) -> str:
+        mapping = {
+            "优": "优", "良": "良",
+            "轻度污染": "轻度污染", "中度污染": "中度污染",
+            "重度污染": "重度污染", "严重污染": "严重污染",
+        }
+        return mapping.get(category, category)
+
+    async def get_aqi_by_coords(self, latitude: float, longitude: float) -> Optional[dict]:
+        if not self.api_key:
+            return None
+        try:
+            params = {"location": f"{longitude:.2f},{latitude:.2f}", "key": self.api_key}
+            resp = await self._client.get(f"{self.base_url}/air/now", params=params)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if data.get("code") != "200":
+                return None
+            now = data["now"]
+            aqi_val = int(now.get("aqi", 0))
+            return {
+                "aqi": aqi_val,
+                "aqi_level": now.get("category"),
+                "pm2_5": float(now.get("pm2p5")) if now.get("pm2p5") else None,
+                "pm10": float(now.get("pm10")) if now.get("pm10") else None,
+                "so2": float(now.get("so2")) if now.get("so2") else None,
+                "no2": float(now.get("no2")) if now.get("no2") else None,
+                "co": float(now.get("co")) if now.get("co") else None,
+                "o3": float(now.get("o3")) if now.get("o3") else None,
+            }
+        except Exception:
+            return None
+
+    async def get_aqi_by_city(self, city: str, country: str = "CN") -> Optional[dict]:
+        if not self.api_key:
+            return None
+        try:
+            loc_id = await self._lookup_location(city)
+            if not loc_id:
+                return None
+            params = {"location": loc_id, "key": self.api_key}
+            resp = await self._client.get(f"{self.base_url}/air/now", params=params)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if data.get("code") != "200":
+                return None
+            now = data["now"]
+            aqi_val = int(now.get("aqi", 0))
+            return {
+                "aqi": aqi_val,
+                "aqi_level": now.get("category"),
+                "pm2_5": float(now.get("pm2p5")) if now.get("pm2p5") else None,
+                "pm10": float(now.get("pm10")) if now.get("pm10") else None,
+                "so2": float(now.get("so2")) if now.get("so2") else None,
+                "no2": float(now.get("no2")) if now.get("no2") else None,
+                "co": float(now.get("co")) if now.get("co") else None,
+                "o3": float(now.get("o3")) if now.get("o3") else None,
+            }
+        except Exception:
+            return None
+
     async def get_current_by_city(self, city: str, country: str = "CN") -> Optional[CurrentWeather]:
         if not self.api_key:
             return None

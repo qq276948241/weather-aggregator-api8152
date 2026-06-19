@@ -141,6 +141,8 @@ class WeatherSubscription(WeatherSubscriptionBase):
 
 
 class WeatherDataPoint(BaseModel):
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     temperature: Optional[float] = None
     humidity: Optional[float] = None
     wind_speed: Optional[float] = None
@@ -151,12 +153,18 @@ class WeatherDataPoint(BaseModel):
     feels_like: Optional[float] = None
     visibility: Optional[float] = None
     uv_index: Optional[float] = None
+    aqi: Optional[int] = None
+    aqi_level: Optional[str] = None
+    pm2_5: Optional[float] = None
+    pm10: Optional[float] = None
+    so2: Optional[float] = None
+    no2: Optional[float] = None
+    co: Optional[float] = None
+    o3: Optional[float] = None
 
 
 class CurrentWeather(WeatherDataPoint):
     location: str
-    latitude: float
-    longitude: float
     data_source: str
     observed_at: datetime
 
@@ -192,6 +200,14 @@ class WeatherHistoryRecord(BaseModel):
     precipitation: Optional[float] = None
     pressure: Optional[float] = None
     weather_condition: Optional[str] = None
+    aqi: Optional[int] = None
+    aqi_level: Optional[str] = None
+    pm2_5: Optional[float] = None
+    pm10: Optional[float] = None
+    so2: Optional[float] = None
+    no2: Optional[float] = None
+    co: Optional[float] = None
+    o3: Optional[float] = None
     data_source: Optional[str] = None
 
 

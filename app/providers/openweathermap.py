@@ -25,6 +25,56 @@ class OpenWeatherMapProvider(WeatherProvider):
     def _condition_map(self, main: str) -> str:
         return WEATHER_DESC_MAP.get(main, main)
 
+    def _aqi_level(self, aqi: int) -> str:
+        if aqi == 1:
+            return "优"
+        if aqi == 2:
+            return "良"
+        if aqi == 3:
+            return "轻度污染"
+        if aqi == 4:
+            return "中度污染"
+        if aqi == 5:
+            return "重度污染"
+        return "严重污染"
+
+    def _aqi_to_cn(self, aqi: int) -> int:
+        mapping = {1: 25, 2: 75, 3: 125, 4: 175, 5: 250}
+        return mapping.get(aqi, 300)
+
+    async def get_aqi_by_coords(self, latitude: float, longitude: float) -> Optional[dict]:
+        if not self.api_key:
+            return None
+        try:
+            params = {"lat": latitude, "lon": longitude, "appid": self.api_key}
+            resp = await self._client.get(f"{self.base_url}/air_pollution", params=params)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if not data.get("list"):
+                return None
+            item = data["list"][0]
+            components = item.get("components", {})
+            owm_aqi = item.get("main", {}).get("aqi", 1)
+            return {
+                "aqi": self._aqi_to_cn(owm_aqi),
+                "aqi_level": self._aqi_level(owm_aqi),
+                "pm2_5": components.get("pm2_5"),
+                "pm10": components.get("pm10"),
+                "so2": components.get("so2"),
+                "no2": components.get("no2"),
+                "co": components.get("co"),
+                "o3": components.get("o3"),
+            }
+        except Exception:
+            return None
+
+    async def get_aqi_by_city(self, city: str, country: str = "CN") -> Optional[dict]:
+        coords = await self._resolve_city(city, country)
+        if not coords:
+            return None
+        return await self.get_aqi_by_coords(coords[0], coords[1])
+
     async def get_current_by_city(self, city: str, country: str = "CN") -> Optional[CurrentWeather]:
         if not self.api_key:
             return None

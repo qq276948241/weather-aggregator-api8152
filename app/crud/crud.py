@@ -50,7 +50,7 @@ def get_fleets(db: Session, skip: int = 0, limit: int = 100) -> List[models.Flee
 
 def create_fleet(db: Session, fleet: schemas.FleetCreate) -> models.Fleet:
     fleet_data = fleet.model_dump()
-    route_ids = fleet_data.pop("route_ids", [])
+    route_ids = fleet_data.pop("route_ids", None) or []
     db_fleet = models.Fleet(**fleet_data)
     db.add(db_fleet)
     db.commit()
